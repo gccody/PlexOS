@@ -61,34 +61,40 @@ apt-get install -y --no-install-recommends \
     linux-image-amd64 systemd-sysv live-boot \
     network-manager net-tools wireless-tools \
     sudo curl ca-certificates locales \
-    grub-pc-bin grub-efi-amd64-bin grub-efi-ia32-bin
+    grub-pc-bin grub-efi-amd64-bin grub-efi-ia32-bin \
+    iputils-ping
 
-# 2. Install Audio, Graphics, Kiosk (Cage) & Flatpak
+# 2. Install Audio, Graphics, Kiosk (Cage) & Snapd
 apt-get install -y --no-install-recommends \
     cage xwayland \
     pipewire wireplumber \
     mesa-vulkan-drivers libgl1-mesa-dri \
-    flatpak \
+    snapd \
     dbus-user-session \
-    libpam-systemd
+    libpam-systemd \
+    pciutils mesa-utils
 
 # 3. Configure Locales
 echo "en_US.UTF-8 UTF-8" > /etc/locale.gen
 locale-gen
 echo "LANG=en_US.UTF-8" > /etc/default/locale
 
-# 4. Set Hostname
+# 4. Set Hostname & Hosts file
 echo "${OS_NAME}" > /etc/hostname
+cat <<HOSTS > /etc/hosts
+127.0.0.1   localhost
+127.0.1.1   ${OS_NAME}
+::1         localhost ip6-localhost ip6-loopback
+ff02::1     ip6-allnodes
+ff02::2     ip6-allrouters
+HOSTS
 
 # 5. Create 'plex' user
 useradd -m -s /bin/bash -G sudo,video,audio,render,plugdev plex
 echo "plex:plex" | chpasswd
 echo "plex ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/plex
 
-# 6. Configure Flatpak Remote & Install Plex
-flatpak remote-add --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
-# Pre-install Plex HTPC to ensure it's available on first boot
-flatpak install -y flathub tv.plex.PlexHTPC
+# 6. (Configuration for Snap happens at runtime)
 
 # 7. Auto-Login
 mkdir -p /etc/systemd/system/getty@tty1.service.d
@@ -103,17 +109,42 @@ cat <<'LAUNCH' > /home/plex/launch-kiosk.sh
 #!/bin/bash
 set -e
 
+# Add Snap binaries to PATH
+export PATH=\$PATH:/snap/bin
+
+# Fix for QEMU/VMs and some hardware (cursor visibility and software fallback)
+export WLR_NO_HARDWARE_CURSORS=1
+export WLR_RENDERER_ALLOW_SOFTWARE=1
+
 # Ensure XDG_RUNTIME_DIR is set (required for Wayland/Cage)
-if [ -z "$XDG_RUNTIME_DIR" ]; then
-    export XDG_RUNTIME_DIR="/run/user/$(id -u)"
-    if [ ! -d "$XDG_RUNTIME_DIR" ]; then
-        mkdir -p "$XDG_RUNTIME_DIR"
-        chmod 700 "$XDG_RUNTIME_DIR"
+if [ -z "\$XDG_RUNTIME_DIR" ]; then
+    export XDG_RUNTIME_DIR="/tmp/plex-runtime-\$(id -u)"
+    if [ ! -d "\$XDG_RUNTIME_DIR" ]; then
+        mkdir -p "\$XDG_RUNTIME_DIR"
+        chmod 700 "\$XDG_RUNTIME_DIR"
     fi
 fi
 
+# Install Plex HTPC (Snap) if missing
+# Snaps require systemd, so we install on first boot instead of build time
+if ! snap list plex-htpc >/dev/null 2>&1; then
+    echo "Plex HTPC not found. Waiting for internet to install..."
+    until ping -c1 google.com >/dev/null 2>&1; do 
+        sleep 2
+    done
+    
+    echo "Preparing Snap environment..."
+    # Fix "snapd too old" error by installing core first
+    sudo snap install core
+    # Ensure snapd itself is up to date
+    sudo snap refresh snapd || true
+    
+    echo "Installing Plex HTPC..."
+    sudo snap install plex-htpc
+fi
+
 # Run Plex via Cage
-exec cage -s -- flatpak run tv.plex.PlexHTPC
+exec cage -s -- snap run plex-htpc
 LAUNCH
 chmod +x /home/plex/launch-kiosk.sh
 chown plex:plex /home/plex/launch-kiosk.sh
